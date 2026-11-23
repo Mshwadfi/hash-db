@@ -64,7 +64,7 @@ func isDigit(ch byte) bool {
 }
 
 func isSymbol(ch byte) bool {
-	operators := "()*=<>!,;"
+	operators := "()*=<>!,;-"
 	return strings.ContainsRune(operators, rune(ch))
 }
 func isWhitespace(ch byte) bool {

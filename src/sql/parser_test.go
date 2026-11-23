@@ -1,7 +1,10 @@
 package sql
 
 import (
+	"errors"
+	"math"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -60,6 +63,7 @@ func TestParse(t *testing.T) {
 		{"SELECT * FROM users WHERE deleted = NULL", false, selectWhere("deleted", OpEq, Literal{Kind: LiteralNull})},
 		{"SELECT * FROM users WHERE name = ''", false, selectWhere("name", OpEq, Literal{Kind: LiteralString, StrVal: ""})},
 		{"SELECT * FROM users WHERE age >= 18;", false, selectWhere("age", OpGte, intLit(18))},
+		{"SELECT * FROM users WHERE age > -1", false, selectWhere("age", OpGt, intLit(-1))},
 		// malformed WHERE clauses
 		{"SELECT * FROM users WHERE", true, nil},
 		{"SELECT * FROM users WHERE age", true, nil},
@@ -98,4 +102,104 @@ func intLit(n int64) Literal {
 
 func selectWhere(column string, op CompareOp, value Literal) *SelectStatement {
 	return &SelectStatement{TableName: "users", Where: &WhereClause{ColumnName: column, Op: op, Value: value}}
+}
+
+func strLit(s string) Literal {
+	return Literal{Kind: LiteralString, StrVal: s}
+}
+
+func boolLit(b bool) Literal {
+	return Literal{Kind: LiteralBool, BoolVal: b}
+}
+
+func nullLit() Literal {
+	return Literal{Kind: LiteralNull}
+}
+
+// eof marks an error that should be reported at the end of the input.
+const eof = "<EOF>"
+
+func TestParseInsert(t *testing.T) {
+	tests := []struct {
+		input string
+		want  *InsertStatement
+		// errAt is the piece of input the error should point at (its first
+		// occurrence), or eof. Empty means the parse must succeed.
+		errAt string
+	}{
+		// valid statements
+		{input: "INSERT INTO users VALUES (1, 'Alice')", want: &InsertStatement{TableName: "users", Values: []Literal{intLit(1), strLit("Alice")}}},
+		{input: "INSERT INTO users VALUES (2, 'Bob');", want: &InsertStatement{TableName: "users", Values: []Literal{intLit(2), strLit("Bob")}}},
+		{input: "INSERT INTO users VALUES (1)", want: &InsertStatement{TableName: "users", Values: []Literal{intLit(1)}}},
+		{input: "insert into users values (1)", want: &InsertStatement{TableName: "users", Values: []Literal{intLit(1)}}},
+		{input: "INSERT INTO users VALUES (NULL, TRUE, FALSE, '')", want: &InsertStatement{TableName: "users", Values: []Literal{nullLit(), boolLit(true), boolLit(false), strLit("")}}},
+		{input: "INSERT INTO users VALUES ( 1 ,\n\t'x' )", want: &InsertStatement{TableName: "users", Values: []Literal{intLit(1), strLit("x")}}},
+		{input: "INSERT INTO users VALUES (1, 2, 3, 4, 5, 6, 7, 8)", want: &InsertStatement{TableName: "users", Values: []Literal{intLit(1), intLit(2), intLit(3), intLit(4), intLit(5), intLit(6), intLit(7), intLit(8)}}},
+
+		// negative numbers
+		{input: "INSERT INTO t VALUES (-5)", want: &InsertStatement{TableName: "t", Values: []Literal{intLit(-5)}}},
+		{input: "INSERT INTO t VALUES (- 5)", want: &InsertStatement{TableName: "t", Values: []Literal{intLit(-5)}}},
+		{input: "INSERT INTO t VALUES (-1, 2, -3)", want: &InsertStatement{TableName: "t", Values: []Literal{intLit(-1), intLit(2), intLit(-3)}}},
+		{input: "INSERT INTO t VALUES (-9223372036854775808)", want: &InsertStatement{TableName: "t", Values: []Literal{intLit(math.MinInt64)}}},
+		{input: "INSERT INTO t VALUES ('-')", want: &InsertStatement{TableName: "t", Values: []Literal{strLit("-")}}},
+		{input: "INSERT INTO t VALUES (-9223372036854775809)", errAt: "9223372036854775809"},
+		{input: "INSERT INTO t VALUES (--5)", errAt: "-5"},
+		{input: "INSERT INTO t VALUES (-'x')", errAt: "'x'"},
+		{input: "INSERT INTO t VALUES (-TRUE)", errAt: "TRUE"},
+		{input: "INSERT INTO t VALUES (-)", errAt: ")"},
+		{input: "INSERT INTO t VALUES (5-)", errAt: "-"},
+
+		// missing or wrong keywords / names
+		{input: "INSERT users VALUES (1)", errAt: "users"},
+		{input: "INSERT INTO VALUES (1)", errAt: "VALUES"},
+		{input: "INSERT INTO users (1)", errAt: "("},
+		{input: "INSERT INTO users VALUES 1", errAt: "1"},
+		{input: "INSERT INTO", errAt: eof},
+		{input: "INSERT INTO users VALUES", errAt: eof},
+
+		// malformed value lists
+		{input: "INSERT INTO users VALUES ()", errAt: ")"},
+		{input: "INSERT INTO users VALUES (1,)", errAt: ")"},
+		{input: "INSERT INTO users VALUES (,1)", errAt: ","},
+		{input: "INSERT INTO users VALUES (1,,2)", errAt: ",2"},
+		{input: "INSERT INTO users VALUES (1 2)", errAt: "2"},
+		{input: "INSERT INTO users VALUES (1", errAt: eof},
+		{input: "INSERT INTO users VALUES (1,", errAt: eof},
+		{input: "INSERT INTO t VALUES (name)", errAt: "name"},
+		{input: "INSERT INTO t VALUES (1)(2)", errAt: "(2)"},
+
+		// trailing garbage
+		{input: "INSERT INTO users VALUES (3, 'Charlie') extra", errAt: "extra"},
+		{input: "INSERT INTO users VALUES (1); junk", errAt: "junk"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			stmt, err := Parse(tc.input)
+
+			if tc.errAt == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(stmt, tc.want) {
+					t.Fatalf("got %+v, want %+v", stmt, tc.want)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error at %q, got %+v", tc.errAt, stmt)
+			}
+			var pe *ParseError
+			if !errors.As(err, &pe) {
+				t.Fatalf("expected *ParseError, got %T: %v", err, err)
+			}
+			wantPos := len(tc.input)
+			if tc.errAt != eof {
+				wantPos = strings.Index(tc.input, tc.errAt)
+			}
+			if pe.Pos != wantPos {
+				t.Fatalf("error at position %d, want %d (%q): %v", pe.Pos, wantPos, tc.errAt, err)
+			}
+		})
+	}
 }

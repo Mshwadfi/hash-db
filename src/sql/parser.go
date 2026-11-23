@@ -97,6 +97,12 @@ func Parse(input string) (Statement, error) {
 				return nil, err
 			}
 			stmt = s
+		case "INSERT":
+			s, err := p.parseInsert()
+			if err != nil {
+				return nil, err
+			}
+			stmt = s
 		default:
 			return nil, &ParseError{Message: fmt.Sprintf("Unexpected keyword: %s", token.Literal), Pos: token.Pos}
 		}
@@ -140,11 +146,25 @@ func (p *Parser) parseSelect() (*SelectStatement, error) {
 // parse select helpers
 func parseLiteral(p *Parser) (Literal, error) {
 	token := p.next()
+
+	// A leading '-' symbol makes the next number negative. Check Type too:
+	// the string literal '-' has the same text but is not a minus sign.
+	sign := ""
+	if token.Type == TokenSymbol && token.Literal == "-" {
+		sign = "-"
+		token = p.next()
+		if token.Type != TokenNumber {
+			return Literal{}, &ParseError{Message: fmt.Sprintf("Expected number after '-', got %s", token.Literal), Pos: token.Pos}
+		}
+	}
+
 	switch token.Type {
 	case TokenNumber:
-		intVal, err := strconv.ParseInt(token.Literal, 10, 64)
+		// Parse sign and digits together so -9223372036854775808 (min int64)
+		// fits; parsing the digits alone would overflow before negating.
+		intVal, err := strconv.ParseInt(sign+token.Literal, 10, 64)
 		if err != nil {
-			return Literal{}, &ParseError{Message: fmt.Sprintf("Failed to parse integer: %s", token.Literal), Pos: token.Pos}
+			return Literal{}, &ParseError{Message: fmt.Sprintf("Failed to parse integer: %s%s", sign, token.Literal), Pos: token.Pos}
 		}
 		return Literal{Kind: LiteralInt, IntVal: intVal}, nil
 	case TokenString:
@@ -207,4 +227,59 @@ func parseWhereClause(p *Parser) (*WhereClause, error) {
 		return nil, err
 	}
 	return &WhereClause{ColumnName: columnName, Op: op, Value: value}, nil
+}
+
+// parseInsert parses: INSERT INTO <table> VALUES (<literal>, ...)
+// v1: no column list; values must match the schema's column order.
+func (p *Parser) parseInsert() (*InsertStatement, error) {
+	if err := p.expectKeyword("INSERT"); err != nil {
+		return nil, err
+	}
+	if err := p.expectKeyword("INTO"); err != nil {
+		return nil, err
+	}
+	tableName, err := p.expectIdentifier()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectKeyword("VALUES"); err != nil {
+		return nil, err
+	}
+	if err := p.expectSymbol("("); err != nil {
+		return nil, err
+	}
+
+	values, err := parseValues(p)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := p.expectSymbol(")"); err != nil {
+		return nil, err
+	}
+
+	return &InsertStatement{TableName: tableName, Values: values}, nil
+}
+
+// parse values: grammar value1, value2, ...
+func parseValues(p *Parser) ([]Literal, error) {
+	var values []Literal
+	for {
+		value, err := parseLiteral(p)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+
+		token := p.peek()
+		if token.Type == TokenSymbol && token.Literal == "," {
+			p.next() // consume the comma
+			continue
+		} else if token.Type == TokenSymbol && token.Literal == ")" {
+			break // end of values
+		} else {
+			return nil, &ParseError{Message: fmt.Sprintf("Expected ',' or ')', got %s", token.Literal), Pos: token.Pos}
+		}
+	}
+	return values, nil
 }
