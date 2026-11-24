@@ -3,6 +3,7 @@ package sql
 import (
 	"errors"
 	"math"
+	"mydb/src/tuple"
 	"reflect"
 	"strings"
 	"testing"
@@ -176,6 +177,58 @@ func TestParseInsert(t *testing.T) {
 		t.Run(tc.input, func(t *testing.T) {
 			stmt, err := Parse(tc.input)
 
+			if tc.errAt == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(stmt, tc.want) {
+					t.Fatalf("got %+v, want %+v", stmt, tc.want)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error at %q, got %+v", tc.errAt, stmt)
+			}
+			var pe *ParseError
+			if !errors.As(err, &pe) {
+				t.Fatalf("expected *ParseError, got %T: %v", err, err)
+			}
+			wantPos := len(tc.input)
+			if tc.errAt != eof {
+				wantPos = strings.Index(tc.input, tc.errAt)
+			}
+			if pe.Pos != wantPos {
+				t.Fatalf("error at position %d, want %d (%q): %v", pe.Pos, wantPos, tc.errAt, err)
+			}
+		})
+	}
+}
+
+func TestParseCreate(t *testing.T) {
+	tests := []struct {
+		input string
+		want  *CreateTableStatement
+		errAt string
+	}{
+		{input: "CREATE TABLE users (id INT, name varchar, active BOOLEAN)", want: &CreateTableStatement{TableName: "users", Columns: []ColumnDef{{Name: "id", Type: tuple.TypeInt}, {Name: "name", Type: tuple.TypeVarchar}, {Name: "active", Type: tuple.TypeBoolean}}}},
+		{input: "CREATE TABLE users (id INT, name varchar)", want: &CreateTableStatement{TableName: "users", Columns: []ColumnDef{{Name: "id", Type: tuple.TypeInt}, {Name: "name", Type: tuple.TypeVarchar}}}},
+		{input: "CREATE TABLE users (id INT)", want: &CreateTableStatement{TableName: "users", Columns: []ColumnDef{{Name: "id", Type: tuple.TypeInt}}}},
+		{input: "CREATE TABLE users (id INT, name varchar, active BOOLEAN);", want: &CreateTableStatement{TableName: "users", Columns: []ColumnDef{{Name: "id", Type: tuple.TypeInt}, {Name: "name", Type: tuple.TypeVarchar}, {Name: "active", Type: tuple.TypeBoolean}}}},
+		{input: "CREATE TABLE users (id INT, name varchar, active BOOLEAN) extra", errAt: "extra"},
+		{input: "CREATE TABLE users id INT, name varchar, active BOOLEAN)", errAt: "id"},
+		{input: "CREATE TABLE users (id INT, name varchar, active BOOLEAN", errAt: eof},
+		{input: "CREATE TABLE users (id INT, name varchar, active UNKNOWN)", errAt: "UNKNOWN"},
+		{input: "CREATE TABLE t (id SELECT)", errAt: "SELECT"},
+		{input: "CREATE TABLE t ()", errAt: ")"},
+		{input: "CREATE TABLE t (id)", errAt: ")"},
+		{input: "CREATE TABLE t (id INT,)", errAt: ")"},
+		{input: "CREATE t (id INT)", errAt: "t"},
+		{input: "CREATE TABLE t (id BIGINT)", want: &CreateTableStatement{TableName: "t", Columns: []ColumnDef{{Name: "id", Type: tuple.TypeBigInt}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			stmt, err := Parse(tc.input)
 			if tc.errAt == "" {
 				if err != nil {
 					t.Fatal(err)

@@ -2,6 +2,7 @@ package sql
 
 import (
 	"fmt"
+	"mydb/src/tuple"
 	"strconv"
 )
 
@@ -99,6 +100,12 @@ func Parse(input string) (Statement, error) {
 			stmt = s
 		case "INSERT":
 			s, err := p.parseInsert()
+			if err != nil {
+				return nil, err
+			}
+			stmt = s
+		case "CREATE":
+			s, err := p.parseCreate()
 			if err != nil {
 				return nil, err
 			}
@@ -282,4 +289,73 @@ func parseValues(p *Parser) ([]Literal, error) {
 		}
 	}
 	return values, nil
+}
+
+// parseCreate parses: CREATE TABLE <table> (<column name> <column type>, ...)
+func (p *Parser) parseCreate() (*CreateTableStatement, error) {
+	if err := p.expectKeyword("CREATE"); err != nil {
+		return nil, err
+	}
+	if err := p.expectKeyword("TABLE"); err != nil {
+		return nil, err
+	}
+	tableName, err := p.expectIdentifier()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectSymbol("("); err != nil {
+		return nil, err
+	}
+
+	columns, err := parseColumns(p)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := p.expectSymbol(")"); err != nil {
+		return nil, err
+	}
+
+	return &CreateTableStatement{TableName: tableName, Columns: columns}, nil
+}
+
+// parse columns: grammar <column name> <column type>, ...
+func parseColumns(p *Parser) ([]ColumnDef, error) {
+	var columns []ColumnDef
+	for {
+		columnName, err := p.expectIdentifier()
+		if err != nil {
+			return nil, err
+		}
+		token := p.next()
+		if token.Type != TokenKeyword {
+			return nil, &ParseError{Message: fmt.Sprintf("Expected column type, got %s", token.Literal), Pos: token.Pos}
+		}
+
+		typeID, ok := getColumnType[token.Literal]
+		if !ok {
+			return nil, &ParseError{Message: fmt.Sprintf("Unknown column type: %s", token.Literal), Pos: token.Pos}
+		}
+		columns = append(columns, ColumnDef{Name: columnName, Type: typeID})
+		token = p.peek()
+		if token.Type == TokenSymbol && token.Literal == "," {
+			p.next() // consume the comma & go to next column
+			continue
+		} else if token.Type == TokenSymbol && token.Literal == ")" {
+			break // end of columns
+		} else {
+			return nil, &ParseError{Message: fmt.Sprintf("Expected ',' or ')', got %s", token.Literal), Pos: token.Pos}
+		}
+	}
+	return columns, nil
+}
+
+// parse list: generic helper we use to parse list (works with columns and values) // to be added in the future
+
+// convert column type string to ColumnType enum
+var getColumnType = map[string]tuple.TypeID{
+	"INT":     tuple.TypeInt,
+	"VARCHAR": tuple.TypeVarchar,
+	"BOOLEAN": tuple.TypeBoolean,
+	"BIGINT":  tuple.TypeBigInt,
 }
