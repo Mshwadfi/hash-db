@@ -1,6 +1,10 @@
 package tuple
 
-import "errors"
+import (
+	"cmp"
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrTypeMismatch is returned when a value is of the wrong type
@@ -74,4 +78,35 @@ func (v Value) AsVarchar() (string, error) {
 		return "", ErrTypeMismatch
 	}
 	return v.stringValue, nil
+}
+
+// Compare orders v against other: -1 if v < other, 0 if equal, +1 if v > other.
+// Both values must have the same type, otherwise ErrTypeMismatch.
+//
+// Ordering rules:
+//   - INT, BIGINT: numeric order
+//   - VARCHAR: byte order (no collation), so 'Z' < 'a'
+//   - BOOLEAN: false < true, same as Postgres
+func (v Value) Compare(other Value) (int, error) {
+	if v.typ != other.typ {
+		return 0, fmt.Errorf("%w: cannot compare %s with %s", ErrTypeMismatch, v.typ, other.typ)
+	}
+	switch v.typ {
+	case TypeInt:
+		return cmp.Compare(v.intValue, other.intValue), nil
+	case TypeBigInt:
+		return cmp.Compare(v.bigIntValue, other.bigIntValue), nil
+	case TypeVarchar:
+		return cmp.Compare(v.stringValue, other.stringValue), nil
+	case TypeBoolean:
+		return cmp.Compare(boolToInt(v.boolValue), boolToInt(other.boolValue)), nil
+	}
+	return 0, fmt.Errorf("%w: %s", errInvalidType, v.typ)
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

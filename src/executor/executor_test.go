@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"mydb/src/catalog"
@@ -192,5 +193,65 @@ func TestInsertSelectRoundTrip(t *testing.T) {
 				t.Errorf("row %d col %d = %v, want %v", i, j, got, v)
 			}
 		}
+	}
+}
+
+func TestSelectWhere(t *testing.T) {
+	e := newTestExecutor(t)
+	mustExec(t, e, "CREATE TABLE users (id INT, name VARCHAR, active BOOLEAN)")
+	mustExec(t, e, "INSERT INTO users VALUES (1, 'a', TRUE)")
+	mustExec(t, e, "INSERT INTO users VALUES (2, 'b', FALSE)")
+	mustExec(t, e, "INSERT INTO users VALUES (3, 'c', TRUE)")
+
+	tests := []struct {
+		query string
+		want  []int32 // ids of the matching rows, in order
+	}{
+		{"SELECT * FROM users WHERE id = 2", []int32{2}},
+		{"SELECT * FROM users WHERE id != 2", []int32{1, 3}},
+		{"SELECT * FROM users WHERE id < 2", []int32{1}},
+		{"SELECT * FROM users WHERE id <= 2", []int32{1, 2}},
+		{"SELECT * FROM users WHERE id > 2", []int32{3}},
+		{"SELECT * FROM users WHERE id >= 2", []int32{2, 3}},
+		{"SELECT * FROM users WHERE id > -1", []int32{1, 2, 3}},
+		{"SELECT * FROM users WHERE name = 'b'", []int32{2}},
+		{"SELECT * FROM users WHERE name > 'a'", []int32{2, 3}},
+		{"SELECT * FROM users WHERE active = TRUE", []int32{1, 3}},
+		{"SELECT * FROM users WHERE id = 99", []int32{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.query, func(t *testing.T) {
+			res := mustExec(t, e, tc.query)
+			got := make([]int32, 0, len(res.Rows))
+			for _, row := range res.Rows {
+				id, err := row.Value(0).AsInt()
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, id)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("ids = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSelectWhereErrors(t *testing.T) {
+	e := newTestExecutor(t)
+	// empty table on purpose: bad WHERE clauses must fail before any row is read
+	mustExec(t, e, "CREATE TABLE users (id INT, name VARCHAR)")
+
+	if _, err := exec(e, "SELECT * FROM users WHERE nope = 1"); !errors.Is(err, tuple.ErrColumnNotFound) {
+		t.Errorf("unknown column: got %v, want ErrColumnNotFound", err)
+	}
+	if _, err := exec(e, "SELECT * FROM users WHERE id = 'x'"); err == nil {
+		t.Error("type mismatch: expected error")
+	}
+	if _, err := exec(e, "SELECT * FROM users WHERE id = 3000000000"); err == nil {
+		t.Error("INT overflow in WHERE: expected error")
+	}
+	if _, err := exec(e, "SELECT * FROM nope WHERE id = 1"); !errors.Is(err, catalog.ErrTableNotFound) {
+		t.Errorf("unknown table: got %v, want ErrTableNotFound", err)
 	}
 }
