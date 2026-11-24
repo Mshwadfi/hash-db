@@ -158,6 +158,21 @@ func (e *Executor) executeSelect(stmt *sql.SelectStatement) (*Result, error) {
 		columns = append(columns, col.Name)
 	}
 
+	// Resolve the WHERE column and value once, before scanning: the answer is
+	// the same for every row, and a bad query fails even on an empty table.
+	var whereIdx int
+	var whereValue tuple.Value
+	if stmt.Where != nil {
+		whereIdx, err = schema.GetColumnIndex(stmt.Where.ColumnName)
+		if err != nil {
+			return nil, fmt.Errorf("column %s: %w", stmt.Where.ColumnName, err)
+		}
+		whereValue, err = literalToValue(stmt.Where.Value, schema.Columns[whereIdx].Type)
+		if err != nil {
+			return nil, fmt.Errorf("WHERE %s: %w", stmt.Where.ColumnName, err)
+		}
+	}
+
 	rows := make([]*tuple.Tuple, 0)
 	scanner := table.NewScanner()
 	defer scanner.Close() // releases the pinned page on every return path
@@ -173,8 +188,36 @@ func (e *Executor) executeSelect(stmt *sql.SelectStatement) (*Result, error) {
 		if err != nil {
 			return nil, fmt.Errorf("Failed to deserialize record: %w", err)
 		}
+		if stmt.Where != nil {
+			c, err := rowData.Value(whereIdx).Compare(whereValue)
+			if err != nil {
+				return nil, fmt.Errorf("WHERE %s: %w", stmt.Where.ColumnName, err)
+			}
+			if !matches(c, stmt.Where.Op) {
+				continue
+			}
+		}
 		rows = append(rows, rowData)
 	}
 
 	return &Result{Columns: columns, Rows: rows}, nil
+}
+
+// matches turns a Compare result into the answer for one WHERE operator.
+func matches(c int, op sql.CompareOp) bool {
+	switch op {
+	case sql.OpEq:
+		return c == 0
+	case sql.OpNeq:
+		return c != 0
+	case sql.OpLt:
+		return c < 0
+	case sql.OpGt:
+		return c > 0
+	case sql.OpLte:
+		return c <= 0
+	case sql.OpGte:
+		return c >= 0
+	}
+	return false
 }
