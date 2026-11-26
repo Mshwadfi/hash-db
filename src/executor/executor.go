@@ -5,6 +5,7 @@ import (
 	"math"
 	"mydb/src/catalog"
 	"mydb/src/sql"
+	"mydb/src/storageLayer"
 	"mydb/src/tuple"
 )
 
@@ -64,6 +65,10 @@ func (e *Executor) Execute(stmt sql.Statement) (*Result, error) {
 		return e.executeInsert(s)
 	case *sql.SelectStatement:
 		return e.executeSelect(s)
+	case *sql.DeleteStatement:
+		return e.executeDelete(s)
+	case *sql.UpdateStatement:
+		return e.executeUpdate(s)
 	default:
 		return nil, fmt.Errorf("Unsupported statement type: %T", stmt)
 	}
@@ -158,7 +163,7 @@ func (e *Executor) executeSelect(stmt *sql.SelectStatement) (*Result, error) {
 		columns = append(columns, col.Name)
 	}
 
-	// Resolve the WHERE column and value once, before scanning: the answer is
+	// Resolve the WHERE clause column and value once, before scanning: the answer is
 	// the same for every row, and a bad query fails even on an empty table.
 	var whereIdx int
 	var whereValue tuple.Value
@@ -220,4 +225,187 @@ func matches(c int, op sql.CompareOp) bool {
 		return c >= 0
 	}
 	return false
+}
+
+// execute delete statment
+func (e *Executor) executeDelete(stmt *sql.DeleteStatement) (*Result, error) {
+	table, schema, err := e.catalog.GetTable(stmt.TableName)
+	if err != nil {
+		return nil, fmt.Errorf("DELETE %s: %w", stmt.TableName, err)
+	}
+	serializer, err := tuple.NewSerializer(schema)
+	if err != nil {
+		return nil, fmt.Errorf("DELETE %s: failed to create serializer: %w", stmt.TableName, err)
+	}
+	// resolve where clause
+	var whereColumnIdx int
+	var whereColumnValue tuple.Value
+
+	if stmt.Where != nil {
+		whereIdx, err := schema.GetColumnIndex(stmt.Where.ColumnName)
+		if err != nil {
+			return nil, fmt.Errorf("WHERE %s: %w", stmt.Where.ColumnName, err)
+		}
+		whereValue, err := literalToValue(stmt.Where.Value, schema.Columns[whereIdx].Type)
+		if err != nil {
+			return nil, fmt.Errorf("WHERE %s: %w", stmt.Where.ColumnName, err)
+		}
+
+		whereColumnIdx = whereIdx
+		whereColumnValue = whereValue
+
+	}
+
+	scanner := table.NewScanner()
+	defer scanner.Close()
+	var affectedRows []storageLayer.RecordID
+
+	for {
+		rid, data, ok, err := scanner.Next()
+		if err != nil {
+			return nil, fmt.Errorf("DELETE %s: failed to read next row: %w", stmt.TableName, err)
+		}
+
+		if !ok {
+			break
+		}
+
+		rowData, err := serializer.Deserialize(data)
+
+		if err != nil {
+			return nil, fmt.Errorf("DELETE %s: failed to decode row at %v: %w", stmt.TableName, rid, err)
+		}
+
+		if stmt.Where != nil {
+			c, err := rowData.Value(whereColumnIdx).Compare(whereColumnValue)
+			if err != nil {
+				return nil, fmt.Errorf("WHERE %s: %w", stmt.Where.ColumnName, err)
+			}
+
+			if !matches(c, stmt.Where.Op) {
+				continue
+			}
+		}
+		affectedRows = append(affectedRows, rid)
+	}
+	scanner.Close()
+
+	for i, rid := range affectedRows {
+		if err := table.Delete(rid); err != nil {
+			return nil, fmt.Errorf("DELETE %s: failed to delete row at %v (%d of %d done): %w",
+				stmt.TableName, rid, i, len(affectedRows), err)
+		}
+	}
+
+	return &Result{Message: fmt.Sprintf("%d row(s) deleted", len(affectedRows))}, nil
+
+}
+
+// execute update statement
+func (e *Executor) executeUpdate(stmt *sql.UpdateStatement) (*Result, error) {
+	table, schema, err := e.catalog.GetTable(stmt.TableName)
+	if err != nil {
+		return nil, fmt.Errorf("UPDATE %s: %w", stmt.TableName, err)
+	}
+	serializer, err := tuple.NewSerializer(schema)
+	if err != nil {
+		return nil, fmt.Errorf("UPDATE %s: failed to create serializer: %w", stmt.TableName, err)
+	}
+
+	// resolve set clauses once, so a bad column or value fails even on an empty table
+	setIdx := make([]int, len(stmt.Set))
+	setValues := make([]tuple.Value, len(stmt.Set))
+	for i, set := range stmt.Set {
+		idx, err := schema.GetColumnIndex(set.ColumnName)
+		if err != nil {
+			return nil, fmt.Errorf("SET %s: %w", set.ColumnName, err)
+		}
+		value, err := literalToValue(set.Value, schema.Columns[idx].Type)
+		if err != nil {
+			return nil, fmt.Errorf("SET %s: %w", set.ColumnName, err)
+		}
+		setIdx[i] = idx
+		setValues[i] = value
+	}
+
+	// resolve where clause
+	var whereColumnIdx int
+	var whereColumnValue tuple.Value
+
+	if stmt.Where != nil {
+		whereIdx, err := schema.GetColumnIndex(stmt.Where.ColumnName)
+		if err != nil {
+			return nil, fmt.Errorf("WHERE %s: %w", stmt.Where.ColumnName, err)
+		}
+		whereValue, err := literalToValue(stmt.Where.Value, schema.Columns[whereIdx].Type)
+		if err != nil {
+			return nil, fmt.Errorf("WHERE %s: %w", stmt.Where.ColumnName, err)
+		}
+
+		whereColumnIdx = whereIdx
+		whereColumnValue = whereValue
+	}
+
+	// first: get matching rows
+	// we don't update while scanning: Update can move a row to a later page,
+	// and the scanner would then visit it again
+	scanner := table.NewScanner()
+	defer scanner.Close()
+	var affectedRows []storageLayer.RecordID
+	var newData [][]byte
+
+	for {
+		rid, data, ok, err := scanner.Next()
+		if err != nil {
+			return nil, fmt.Errorf("UPDATE %s: failed to read next row: %w", stmt.TableName, err)
+		}
+
+		if !ok {
+			break
+		}
+
+		rowData, err := serializer.Deserialize(data)
+		if err != nil {
+			return nil, fmt.Errorf("UPDATE %s: failed to decode row at %v: %w", stmt.TableName, rid, err)
+		}
+
+		if stmt.Where != nil {
+			c, err := rowData.Value(whereColumnIdx).Compare(whereColumnValue)
+			if err != nil {
+				return nil, fmt.Errorf("WHERE %s: %w", stmt.Where.ColumnName, err)
+			}
+
+			if !matches(c, stmt.Where.Op) {
+				continue
+			}
+		}
+
+		// build the new row: copy old values then overwrite the SET columns
+		values := make([]tuple.Value, rowData.NumValues())
+		for i := range values {
+			values[i] = rowData.Value(i)
+		}
+		for i, idx := range setIdx {
+			values[idx] = setValues[i]
+		}
+
+		serializedRow, err := serializer.Serialize(tuple.NewTuple(values))
+		if err != nil {
+			return nil, fmt.Errorf("UPDATE %s: failed to encode row at %v: %w", stmt.TableName, rid, err)
+		}
+
+		affectedRows = append(affectedRows, rid)
+		newData = append(newData, serializedRow)
+	}
+	scanner.Close()
+
+	// second: write the updated rows
+	for i, rid := range affectedRows {
+		if _, _, err := table.Update(rid, newData[i]); err != nil {
+			return nil, fmt.Errorf("UPDATE %s: failed to update row at %v (%d of %d done): %w",
+				stmt.TableName, rid, i, len(affectedRows), err)
+		}
+	}
+
+	return &Result{Message: fmt.Sprintf("%d row(s) updated", len(affectedRows))}, nil
 }
