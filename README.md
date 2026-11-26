@@ -1,4 +1,4 @@
-# mydb
+# Hash-db
 
 A relational database built from scratch in Go: slotted pages, a buffer pool, a SQL parser and an executor, with no external dependencies.
 
