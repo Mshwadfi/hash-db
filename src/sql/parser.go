@@ -110,6 +110,18 @@ func Parse(input string) (Statement, error) {
 				return nil, err
 			}
 			stmt = s
+		case "DELETE":
+			s, err := p.parseDelete()
+			if err != nil {
+				return nil, err
+			}
+			stmt = s
+		case "UPDATE":
+			s, err := p.parseUpdate()
+			if err != nil {
+				return nil, err
+			}
+			stmt = s
 		default:
 			return nil, &ParseError{Message: fmt.Sprintf("Unexpected keyword: %s", token.Literal), Pos: token.Pos}
 		}
@@ -358,4 +370,85 @@ var getColumnType = map[string]tuple.TypeID{
 	"VARCHAR": tuple.TypeVarchar,
 	"BOOLEAN": tuple.TypeBoolean,
 	"BIGINT":  tuple.TypeBigInt,
+}
+
+// parse delete
+func (p *Parser) parseDelete() (*DeleteStatement, error) {
+	if err := p.expectKeyword("DELETE"); err != nil {
+		return nil, err
+	}
+
+	if err := p.expectKeyword("FROM"); err != nil {
+		return nil, err
+	}
+
+	tableName, err := p.expectIdentifier()
+	if err != nil {
+		return nil, err
+	}
+
+	WhereClause, err := parseWhereClause(p)
+	if err != nil {
+		return nil, err
+	}
+
+	return &DeleteStatement{TableName: tableName, Where: WhereClause}, nil
+
+}
+
+// parse update
+func (p *Parser) parseUpdate() (*UpdateStatement, error) {
+	if err := p.expectKeyword("UPDATE"); err != nil {
+		return nil, err
+	}
+
+	tableName, err := p.expectIdentifier()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := p.expectKeyword("SET"); err != nil {
+		return nil, err
+	}
+
+	setClauses, err := parseSetClauses(p)
+	if err != nil {
+		return nil, err
+	}
+
+	where, err := parseWhereClause(p)
+	if err != nil {
+		return nil, err
+	}
+
+	return &UpdateStatement{TableName: tableName, Set: setClauses, Where: where}, nil
+}
+
+// parse set clauses: <col> = <literal> [, <col> = <literal>]*
+func parseSetClauses(p *Parser) ([]SetClause, error) {
+	var setClauses []SetClause
+	for {
+		columnName, err := p.expectIdentifier()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectSymbol("="); err != nil {
+			return nil, err
+		}
+		value, err := parseLiteral(p)
+		if err != nil {
+			return nil, err
+		}
+		setClauses = append(setClauses, SetClause{ColumnName: columnName, Value: value})
+
+		// a comma for multi values (set name = .. , age = ..)
+		// anything other like ] means stmt end
+		token := p.peek()
+		if token.Type == TokenSymbol && token.Literal == "," {
+			p.next()
+			continue
+		}
+		break
+	}
+	return setClauses, nil
 }
